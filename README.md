@@ -1,0 +1,2 @@
+# telegram-pinterest-bot
+Бот
