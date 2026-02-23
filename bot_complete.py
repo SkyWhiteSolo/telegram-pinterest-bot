@@ -72,170 +72,94 @@ class PinterestSession:
             return False
     
     def is_ad_pin(self, img_tag, alt_text: str, src: str) -> bool:
-        """
-        Определяет, является ли пин рекламным
-        """
-        # Ключевые слова, указывающие на рекламу
+        """Определяет, является ли пин рекламным"""
         ad_keywords = [
             'ad', 'sponsored', 'промо', 'реклама', 'promo', 
             'shop', 'buy', 'купить', 'магазин', 'store',
             'sale', 'скидка', 'discount', 'заказать',
-            'price', 'цена', '₽', '$', 'руб', 'рублей',
-            'limited', 'offer', 'code', 'промокод'
+            'price', 'цена', '₽', '$', 'руб', 'рублей'
         ]
         
-        # Проверяем alt текст
         alt_lower = alt_text.lower()
         if any(word in alt_lower for word in ad_keywords):
-            logger.info(f"Реклама обнаружена по alt: {alt_text[:50]}")
             return True
         
-        # Проверяем URL на признаки рекламы
         src_lower = src.lower()
         ad_url_patterns = [
             'adsystem', 'adserver', 'doubleclick', 
-            'googleadservices', 'amazon-adsystem',
-            'analytics', 'tracking', 'pixel'
+            'googleadservices', 'amazon-adsystem'
         ]
         if any(pattern in src_lower for pattern in ad_url_patterns):
-            logger.info(f"Реклама обнаружена по URL: {src[:50]}")
             return True
-        
-        # Проверяем наличие промо-атрибутов в теге
-        if img_tag.get('data-sponsored') == 'true':
-            logger.info("Реклама обнаружена по атрибуту data-sponsored")
-            return True
-        
-        # Проверяем на наличие цены в alt
-        price_patterns = [r'\d+\s?₽', r'\d+\s?руб', r'\$\d+', r'€\d+']
-        for pattern in price_patterns:
-            if re.search(pattern, alt_text, re.IGNORECASE):
-                logger.info(f"Реклама обнаружена по цене: {alt_text[:50]}")
-                return True
         
         return False
     
     async def get_real_image_size(self, image_url: str) -> Tuple[int, int]:
-        """
-        РЕАЛЬНАЯ проверка размеров изображения
-        """
+        """РЕАЛЬНАЯ проверка размеров изображения"""
         try:
             async with aiohttp.ClientSession() as session:
-                # Пробуем HEAD запрос
                 async with session.head(image_url, allow_redirects=True) as response:
                     if response.status == 200:
-                        # Пробуем получить размер из URL
-                        import re
-                        
-                        # Ищем паттерны типа /736x/ или /originals/
                         size_match = re.search(r'/(\d+)x/', image_url)
                         if size_match:
                             width = int(size_match.group(1))
                             return (width, width)
                         
-                        # Ищем паттерн /{width}x{height}/
                         size_match = re.search(r'/(\d+)x(\d+)/', image_url)
                         if size_match:
                             width = int(size_match.group(1))
                             height = int(size_match.group(2))
                             return (width, height)
-                
-                # Если HEAD запрос не дал результатов, пробуем GET с range
-                async with session.get(image_url, headers={'Range': 'bytes=0-1024'}) as response:
-                    if response.status in [200, 206]:
-                        data = await response.read()
-                        # Для JPEG
-                        if data.startswith(b'\xff\xd8'):
-                            pos = 0
-                            while pos < len(data):
-                                if data[pos] == 0xFF:
-                                    marker = data[pos+1]
-                                    if marker in [0xC0, 0xC1, 0xC2]:  # SOF маркеры
-                                        height = int.from_bytes(data[pos+5:pos+7], 'big')
-                                        width = int.from_bytes(data[pos+7:pos+9], 'big')
-                                        return (width, height)
-                                    else:
-                                        if marker != 0xDA and marker != 0xD9:
-                                            length = int.from_bytes(data[pos+2:pos+4], 'big')
-                                            pos += length + 2
-                                            continue
-                                pos += 1
         except Exception as e:
             logger.error(f"Ошибка проверки размеров: {e}")
         
         return (0, 0)
     
     def check_image_format(self, width: int, height: int, category: str) -> bool:
-        """
-        Строгая проверка соответствия формату
-        """
+        """Строгая проверка соответствия формату"""
         if width == 0 or height == 0:
-            logger.warning(f"Не удалось определить размер для {category}")
             return False
         
         ratio = width / height if height > 0 else 0
         
         if category == "avatars":
-            # Квадрат: соотношение должно быть близко к 1:1
-            is_square = 0.9 <= ratio <= 1.1
-            if not is_square:
-                logger.info(f"❌ Не квадрат: {width}x{height} (ratio: {ratio:.2f})")
-            return is_square
+            return 0.9 <= ratio <= 1.1
         
         elif category == "wallpapers_pc":
-            # Горизонтальные: ширина должна быть больше высоты
             if width < 800 or height < 600:
-                logger.info(f"❌ Слишком маленькое для ПК: {width}x{height}")
                 return False
-            is_landscape = ratio > 1.3
-            if not is_landscape:
-                logger.info(f"❌ Не горизонтальное: {width}x{height} (ratio: {ratio:.2f})")
-            return is_landscape
+            return ratio > 1.3
         
         elif category == "wallpapers_phone":
-            # Вертикальные: высота должна быть больше ширины
             if width < 600 or height < 800:
-                logger.info(f"❌ Слишком маленькое для телефона: {width}x{height}")
                 return False
-            is_portrait = ratio < 0.77
-            if not is_portrait:
-                logger.info(f"❌ Не вертикальное: {width}x{height} (ratio: {ratio:.2f})")
-            return is_portrait
+            return ratio < 0.77
         
         return True
     
     async def get_filtered_images(self, category: str, count: int = 10, user_id: str = None) -> List[str]:
-        """
-        Получает изображения со строгой проверкой размеров
-        """
+        """Получает изображения со строгой проверкой размеров"""
         images = []
         attempts = 0
         max_attempts = 100
         ad_skipped = 0
         size_skipped = 0
         
-        # Специализированные поисковые запросы
         search_queries = {
             "avatars": [
                 "square avatar 1:1",
                 "profile picture square",
-                "icon 1x1",
-                "square portrait",
-                "1:1 aspect ratio image"
+                "icon 1x1"
             ],
             "wallpapers_pc": [
                 "16:9 wallpaper",
                 "1920x1080 wallpaper",
-                "landscape wide",
-                "desktop background 16:9",
-                "horizontal wallpaper"
+                "landscape wide"
             ],
             "wallpapers_phone": [
                 "9:16 wallpaper",
                 "1080x1920 wallpaper",
-                "vertical wallpaper",
-                "mobile background 9:16",
-                "portrait wallpaper"
+                "vertical wallpaper"
             ]
         }
         
@@ -253,7 +177,6 @@ class PinterestSession:
                         break
                     
                     url = f'https://ru.pinterest.com/search/pins/?q={query.replace(" ", "%20")}'
-                    logger.info(f"Поиск: {query}")
                     
                     async with session.get(url) as resp:
                         if resp.status == 200:
@@ -269,30 +192,24 @@ class PinterestSession:
                                 src = img.get('src', '')
                                 alt = img.get('alt', '').lower()
                                 
-                                # Проверка на рекламу
                                 if self.is_ad_pin(img, alt, src):
                                     ad_skipped += 1
                                     continue
                                 
                                 if 'pinimg.com' in src and '236x' in src:
-                                    # Получаем изображение в максимальном качестве
                                     high_res = src.replace('236x', 'originals')
                                     if 'originals' not in high_res:
                                         high_res = src.replace('236x', '1200x')
                                     
-                                    # РЕАЛЬНАЯ ПРОВЕРКА РАЗМЕРОВ
                                     width, height = await self.get_real_image_size(high_res)
                                     
                                     if width > 0 and height > 0:
                                         if self.check_image_format(width, height, category):
-                                            # Проверка на дубликаты
                                             if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
                                                 continue
                                             
                                             images.append(high_res)
-                                            logger.info(f"✅ Найдено подходящее: {width}x{height} для {category}")
                                             
-                                            # Сохраняем в историю
                                             if user_id:
                                                 if user_id not in self.seen_images:
                                                     self.seen_images[user_id] = {}
@@ -312,9 +229,7 @@ class PinterestSession:
         logger.info(f"Категория {category}: найдено {len(images)}, "
                    f"пропущено рекламы: {ad_skipped}, не подошло по размеру: {size_skipped}")
         
-        # Если не нашли ни одного, используем заглушки
         if not images:
-            logger.info(f"Использую заглушки для {category}")
             return self.get_guaranteed_format_images(category, count)
         
         return images[:count]
@@ -326,11 +241,9 @@ class PinterestSession:
         if category == "avatars":
             for i in range(count):
                 images.append(f"https://api.dicebear.com/7.x/avataaars/svg?seed={random.randint(1, 10000)}")
-        
         elif category == "wallpapers_pc":
             for i in range(count):
                 images.append(f"https://picsum.photos/1920/1080?random={random.randint(1, 10000)}")
-        
         elif category == "wallpapers_phone":
             for i in range(count):
                 images.append(f"https://picsum.photos/1080/1920?random={random.randint(1, 10000)}")
@@ -495,11 +408,13 @@ class TelegramBot:
         
         if query.data == 'back_to_main':
             await self.show_main_menu(update, context)
+            return
         
-        elif query.data == 'menu_files':
+        # ========== ФАЙЛЫ ==========
+        if query.data == 'menu_files':
             keyboard = [
-                [InlineKeyboardButton("📥 Добавить файл", callback_data='add_file_action')],
-                [InlineKeyboardButton("📋 Список файлов", callback_data='list_files_action')],
+                [InlineKeyboardButton("📥 Добавить файл", callback_data='add_file_now')],
+                [InlineKeyboardButton("📋 Список файлов", callback_data='list_files_now')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -509,17 +424,22 @@ class TelegramBot:
                 parse_mode='Markdown'
             )
         
-        elif query.data == 'add_file_action':
-            await query.edit_message_text("📁 Отправьте файл для загрузки.")
-            context.user_data['expected_state'] = 'waiting_file'
-            context.user_data['current_category'] = 'files'
+        elif query.data == 'add_file_now':
+            await query.edit_message_text(
+                "📁 **Отправьте файл**\n\n"
+                "Я жду ваш файл. Просто пришлите его сейчас."
+            )
+            context.user_data['state'] = 'waiting_file'
+            context.user_data['category'] = 'files'
         
-        elif query.data == 'list_files_action':
+        elif query.data == 'list_files_now':
             files = self.data_manager.get_items('files')
             if files:
                 text = "📁 **Список файлов:**\n\n"
                 for i, file in enumerate(files, 1):
-                    text += f"{i}. {file.get('name', 'Без имени')}\n"
+                    name = file.get('name', 'Без имени')
+                    date = file.get('date', '')[:16]
+                    text += f"{i}. {name}\n   📅 {date}\n"
             else:
                 text = "📁 **Нет загруженных файлов**"
             
@@ -527,10 +447,11 @@ class TelegramBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         
+        # ========== ВИДЕО ==========
         elif query.data == 'menu_videos':
             keyboard = [
-                [InlineKeyboardButton("🎥 Добавить видео", callback_data='add_video_action')],
-                [InlineKeyboardButton("📋 Список видео", callback_data='list_videos_action')],
+                [InlineKeyboardButton("🎥 Добавить видео", callback_data='add_video_now')],
+                [InlineKeyboardButton("📋 Список видео", callback_data='list_videos_now')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -540,17 +461,22 @@ class TelegramBot:
                 parse_mode='Markdown'
             )
         
-        elif query.data == 'add_video_action':
-            await query.edit_message_text("🎥 Отправьте видеофайл.")
-            context.user_data['expected_state'] = 'waiting_video'
-            context.user_data['current_category'] = 'videos'
+        elif query.data == 'add_video_now':
+            await query.edit_message_text(
+                "🎥 **Отправьте видео**\n\n"
+                "Я жду ваш видеофайл. Просто пришлите его сейчас."
+            )
+            context.user_data['state'] = 'waiting_video'
+            context.user_data['category'] = 'videos'
         
-        elif query.data == 'list_videos_action':
+        elif query.data == 'list_videos_now':
             videos = self.data_manager.get_items('videos')
             if videos:
                 text = "🎥 **Список видео:**\n\n"
                 for i, video in enumerate(videos, 1):
-                    text += f"{i}. {video.get('name', 'Без имени')}\n"
+                    name = video.get('name', 'Без имени')
+                    date = video.get('date', '')[:16]
+                    text += f"{i}. {name}\n   📅 {date}\n"
             else:
                 text = "🎥 **Нет загруженных видео**"
             
@@ -558,10 +484,11 @@ class TelegramBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         
+        # ========== СКРИНШОТЫ ==========
         elif query.data == 'menu_screenshots':
             keyboard = [
-                [InlineKeyboardButton("📸 Добавить скриншот", callback_data='add_screenshot_action')],
-                [InlineKeyboardButton("📋 Просмотреть скриншоты", callback_data='list_screenshots_action')],
+                [InlineKeyboardButton("📸 Добавить скриншот", callback_data='add_screenshot_now')],
+                [InlineKeyboardButton("📋 Список скриншотов", callback_data='list_screenshots_now')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -571,17 +498,22 @@ class TelegramBot:
                 parse_mode='Markdown'
             )
         
-        elif query.data == 'add_screenshot_action':
-            await query.edit_message_text("📸 Отправьте скриншот.")
-            context.user_data['expected_state'] = 'waiting_screenshot'
-            context.user_data['current_category'] = 'screenshots'
+        elif query.data == 'add_screenshot_now':
+            await query.edit_message_text(
+                "📸 **Отправьте скриншот**\n\n"
+                "Я жду ваше фото. Просто пришлите его сейчас."
+            )
+            context.user_data['state'] = 'waiting_screenshot'
+            context.user_data['category'] = 'screenshots'
         
-        elif query.data == 'list_screenshots_action':
+        elif query.data == 'list_screenshots_now':
             screenshots = self.data_manager.get_items('screenshots')
             if screenshots:
                 text = "📸 **Список скриншотов:**\n\n"
                 for i, ss in enumerate(screenshots, 1):
-                    text += f"{i}. {ss.get('caption', 'Без подписи')}\n"
+                    caption = ss.get('caption', 'Без подписи')
+                    date = ss.get('date', '')[:16]
+                    text += f"{i}. {caption}\n   📅 {date}\n"
             else:
                 text = "📸 **Нет скриншотов**"
             
@@ -589,37 +521,34 @@ class TelegramBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         
+        # ========== ЗАМЕТКИ ==========
         elif query.data == 'menu_notes':
             notes = self.data_manager.get_items('notes')
-            text = "📝 **Заметки**\n\n"
-            
             if notes:
+                text = "📝 **Заметки**\n\n"
                 for i, note in enumerate(notes, 1):
-                    text += f"{i}. {note.get('title', 'Без названия')}\n"
+                    title = note.get('title', 'Без названия')
+                    date = note.get('date', '')[:16]
+                    text += f"{i}. {title}\n   📅 {date}\n"
             else:
-                text += "Нет заметок"
+                text = "📝 **Нет заметок**"
             
             keyboard = [
-                [InlineKeyboardButton("➕ Добавить заметку", callback_data='add_note_action')],
+                [InlineKeyboardButton("➕ Добавить заметку", callback_data='add_note_now')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         
-        elif query.data == 'add_note_action':
-            await query.edit_message_text("📝 Отправьте текст заметки (первая строка - заголовок):")
-            context.user_data['expected_state'] = 'waiting_note'
+        elif query.data == 'add_note_now':
+            await query.edit_message_text(
+                "📝 **Напишите заметку**\n\n"
+                "Первая строка будет заголовком.\n"
+                "Остальной текст - содержание."
+            )
+            context.user_data['state'] = 'waiting_note'
         
-        elif query.data in ['menu_avatars', 'menu_wallpapers_pc', 'menu_wallpapers_phone']:
-            category_map = {
-                'menu_avatars': ('avatars', 'АВАТАРОК'),
-                'menu_wallpapers_pc': ('wallpapers_pc', 'ОБОЕВ ДЛЯ ПК'),
-                'menu_wallpapers_phone': ('wallpapers_phone', 'ОБОЕВ ДЛЯ ТЕЛЕФОНА')
-            }
-            
-            category, ru_name = category_map[query.data]
-            await self.fetch_filtered_images(update, context, category, ru_name)
-        
+        # ========== НАСТРОЙКИ ИГР ==========
         elif query.data == 'menu_game_settings':
             keyboard = []
             for game in GAMES:
@@ -659,7 +588,7 @@ class TelegramBot:
                 "⚙️ Отправьте настройку в формате:\n`Название: значение`\n\nНапример: `Чувствительность: 2.5`",
                 parse_mode='Markdown'
             )
-            context.user_data['expected_state'] = 'waiting_game_setting'
+            context.user_data['state'] = 'waiting_game_setting'
         
         elif query.data == 'delete_game_setting':
             game = context.user_data.get('current_game')
@@ -707,6 +636,17 @@ class TelegramBot:
                         InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')
                     ]])
                 )
+        
+        # ========== PINTEREST КАТЕГОРИИ ==========
+        elif query.data in ['menu_avatars', 'menu_wallpapers_pc', 'menu_wallpapers_phone']:
+            category_map = {
+                'menu_avatars': ('avatars', 'АВАТАРОК'),
+                'menu_wallpapers_pc': ('wallpapers_pc', 'ОБОЕВ ДЛЯ ПК'),
+                'menu_wallpapers_phone': ('wallpapers_phone', 'ОБОЕВ ДЛЯ ТЕЛЕФОНА')
+            }
+            
+            category, ru_name = category_map[query.data]
+            await self.fetch_filtered_images(update, context, category, ru_name)
     
     async def fetch_filtered_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                     category: str, ru_name: str):
@@ -760,13 +700,12 @@ class TelegramBot:
     
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка документов"""
-        expected_state = context.user_data.get('expected_state')
+        state = context.user_data.get('state')
         document = update.message.document
         
         # Проверка на файл с куками
         if document.file_name.endswith('.json'):
             await update.message.reply_text("🔄 Обрабатываю файл с куками...")
-            
             try:
                 file = await context.bot.get_file(document.file_id)
                 file_path = f"temp_{document.file_name}"
@@ -792,8 +731,9 @@ class TelegramBot:
             await self.show_main_menu(update, context)
             return
         
-        if expected_state in ['waiting_file', 'waiting_video']:
-            category = context.user_data.get('current_category', 'files')
+        # Обработка файлов
+        if state == 'waiting_file':
+            category = context.user_data.get('category', 'files')
             
             file_info = {
                 'name': document.file_name,
@@ -804,21 +744,39 @@ class TelegramBot:
             }
             
             self.data_manager.add_item(category, file_info)
+            await update.message.reply_text(f"✅ Файл '{document.file_name}' сохранен!")
             
-            cat_name = 'Файл' if category == 'files' else 'Видео'
-            await update.message.reply_text(f"✅ {cat_name} '{document.file_name}' сохранен!")
-            
-            context.user_data['expected_state'] = None
-            context.user_data['current_category'] = None
+            context.user_data['state'] = None
+            context.user_data['category'] = None
             await self.show_main_menu(update, context)
+        
+        # Обработка видео
+        elif state == 'waiting_video':
+            category = context.user_data.get('category', 'videos')
+            
+            file_info = {
+                'name': document.file_name,
+                'file_id': document.file_id,
+                'file_size': document.file_size,
+                'mime_type': document.mime_type,
+                'date': datetime.now().isoformat()
+            }
+            
+            self.data_manager.add_item(category, file_info)
+            await update.message.reply_text(f"✅ Видео '{document.file_name}' сохранено!")
+            
+            context.user_data['state'] = None
+            context.user_data['category'] = None
+            await self.show_main_menu(update, context)
+        
         else:
             await update.message.reply_text("❌ Сначала выберите 'Добавить файл' или 'Добавить видео' в меню.")
     
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка фотографий"""
-        expected_state = context.user_data.get('expected_state')
+        state = context.user_data.get('state')
         
-        if expected_state == 'waiting_screenshot':
+        if state == 'waiting_screenshot':
             photo = update.message.photo[-1]
             caption = update.message.caption or "Без подписи"
             
@@ -831,17 +789,18 @@ class TelegramBot:
             self.data_manager.add_item('screenshots', photo_info)
             await update.message.reply_text("✅ Скриншот сохранен!")
             
-            context.user_data['expected_state'] = None
+            context.user_data['state'] = None
             await self.show_main_menu(update, context)
+        
         else:
             await update.message.reply_text("❌ Сначала выберите 'Добавить скриншот' в меню.")
     
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений"""
-        expected_state = context.user_data.get('expected_state')
+        state = context.user_data.get('state')
         text = update.message.text
         
-        if expected_state == 'waiting_note':
+        if state == 'waiting_note':
             lines = text.split('\n', 1)
             title = lines[0][:50] if lines[0] else "Без названия"
             content = lines[1] if len(lines) > 1 else ""
@@ -855,10 +814,10 @@ class TelegramBot:
             self.data_manager.add_item('notes', note)
             await update.message.reply_text(f"✅ Заметка '{title}' сохранена!")
             
-            context.user_data['expected_state'] = None
+            context.user_data['state'] = None
             await self.show_main_menu(update, context)
         
-        elif expected_state == 'waiting_game_setting':
+        elif state == 'waiting_game_setting':
             if ':' in text:
                 name, value = text.split(':', 1)
                 game = context.user_data.get('current_game')
@@ -871,13 +830,14 @@ class TelegramBot:
                 
                 self.data_manager.add_item('game_settings', setting, game)
                 await update.message.reply_text(f"✅ Настройка '{name.strip()}' добавлена в {game}!")
+                
+                context.user_data['state'] = None
             else:
                 await update.message.reply_text("❌ Неверный формат. Используйте: Название: значение")
             
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(f"Вернуться к {game}:", reply_markup=reply_markup)
-            context.user_data['expected_state'] = None
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик ошибок"""
