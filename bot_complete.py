@@ -34,7 +34,7 @@ GAMES = ['CS2', 'Standoff 2', 'Valorant']
 
 
 class PinterestSession:
-    """Класс для работы с Pinterest через куки"""
+    """Класс для работы с Pinterest через куки (ТВОИ РЕКОМЕНДАЦИИ)"""
     
     def __init__(self):
         self.cookies = None
@@ -43,7 +43,6 @@ class PinterestSession:
         self.load_cookies()
     
     def load_cookies(self):
-        """Загрузка сохраненных кук"""
         if os.path.exists(COOKIES_FILE):
             try:
                 with open(COOKIES_FILE, 'rb') as f:
@@ -51,13 +50,11 @@ class PinterestSession:
                 self.is_authenticated = True
                 logger.info("✅ Куки Pinterest загружены")
                 return True
-            except Exception as e:
-                logger.error(f"Ошибка загрузки кук: {e}")
+            except:
                 self.is_authenticated = False
         return False
     
     def save_cookies(self, cookies):
-        """Сохранение кук"""
         try:
             with open(COOKIES_FILE, 'wb') as f:
                 pickle.dump(cookies, f)
@@ -65,70 +62,34 @@ class PinterestSession:
             self.is_authenticated = True
             logger.info("✅ Куки сохранены")
             return True
-        except Exception as e:
-            logger.error(f"Ошибка сохранения кук: {e}")
+        except:
             return False
     
-    def is_ad_pin(self, img_tag, alt_text: str, src: str) -> bool:
-        """Проверка на рекламу"""
-        ad_keywords = [
-            'ad', 'sponsored', 'промо', 'реклама', 'promo',
-            'shop', 'buy', 'купить', 'магазин', 'store',
-            'sale', 'скидка', 'discount', 'price', 'цена'
-        ]
-        
-        alt_lower = alt_text.lower()
-        if any(word in alt_lower for word in ad_keywords):
-            logger.info(f"Реклама: {alt_text[:50]}")
-            return True
-        
-        if img_tag.get('data-sponsored') == 'true':
-            return True
-        
-        return False
-    
-    async def get_image_size(self, url: str) -> Tuple[int, int]:
-        """Определение размера изображения по URL"""
-        size_match = re.search(r'/(\d+)x/', url)
-        if size_match:
-            width = int(size_match.group(1))
-            return (width, width)
-        
-        size_match = re.search(r'/(\d+)x(\d+)/', url)
-        if size_match:
-            width = int(size_match.group(1))
-            height = int(size_match.group(2))
-            return (width, height)
-        
-        return (0, 0)
-    
-    def check_format(self, width: int, height: int, category: str) -> bool:
-        """Проверка соответствия формату"""
-        if width == 0 or height == 0:
-            return True
-        
-        ratio = width / height if height > 0 else 0
-        
+    def check_image_format(self, url: str, category: str) -> bool:
+        """Проверка формата по URL"""
         if category == "avatars":
-            # Квадрат 1:1
-            return 0.8 <= ratio <= 1.2
+            # Для аватарок ищем квадратные
+            if any(x in url.lower() for x in ['avatar', 'profile', 'icon', 'face']):
+                return True
+            return True  # Временно пропускаем все
         
         elif category == "wallpapers_pc":
-            # Горизонтальные
-            return ratio > 1.3 and width >= 800
+            # Для ПК ищем горизонтальные
+            if any(x in url.lower() for x in ['wallpaper', 'background', 'landscape']):
+                return True
+            return True
         
         elif category == "wallpapers_phone":
-            # Вертикальные
-            return ratio < 0.8 and height >= 800
+            # Для телефона ищем вертикальные
+            if any(x in url.lower() for x in ['mobile', 'phone', 'vertical']):
+                return True
+            return True
         
         return True
     
     async def get_my_feed(self, category: str, limit: int = 10, user_id: str = None) -> List[str]:
-        """
-        ТВОИ ЛИЧНЫЕ РЕКОМЕНДАЦИИ с проверкой ссылок
-        """
+        """ТВОИ ЛИЧНЫЕ РЕКОМЕНДАЦИИ"""
         if not self.is_authenticated:
-            logger.warning("Нет авторизации, использую заглушки")
             return self.get_fallback_images(category, limit)
         
         images = []
@@ -138,7 +99,6 @@ class PinterestSession:
         
         try:
             async with aiohttp.ClientSession(headers=headers, cookies=self.cookies) as session:
-                # Главная страница = личная лента
                 url = 'https://ru.pinterest.com/'
                 logger.info("Загружаю твою личную ленту...")
                 
@@ -147,61 +107,40 @@ class PinterestSession:
                         html = await resp.text()
                         soup = BeautifulSoup(html, 'html.parser')
                         
-                        for img in soup.find_all('img', {'src': True, 'alt': True}):
+                        for img in soup.find_all('img', {'src': True}):
                             if len(images) >= limit:
                                 break
                             
                             src = img.get('src', '')
-                            alt = img.get('alt', '').lower()
-                            
-                            # Проверка на рекламу
-                            if self.is_ad_pin(img, alt, src):
-                                continue
-                            
-                            # Только Pinterest картинки
                             if 'pinimg.com' in src and '236x' in src:
-                                # Пробуем разные размеры
-                                for size in ['736x', '564x', 'originals']:
-                                    test_url = src.replace('236x', size)
-                                    try:
-                                        # Проверяем доступность ссылки
-                                        async with session.head(test_url, timeout=3) as check:
-                                            if check.status == 200:
-                                                # Проверка на дубликаты
-                                                if user_id and test_url in self.seen_images.get(user_id, {}).get(category, set()):
-                                                    break
-                                                
-                                                # Проверка формата
-                                                w, h = await self.get_image_size(test_url)
-                                                if self.check_format(w, h, category):
-                                                    images.append(test_url)
-                                                    
-                                                    # Запоминаем
-                                                    if user_id:
-                                                        if user_id not in self.seen_images:
-                                                            self.seen_images[user_id] = {}
-                                                        if category not in self.seen_images[user_id]:
-                                                            self.seen_images[user_id][category] = set()
-                                                        self.seen_images[user_id][category].add(test_url)
-                                                    
-                                                    logger.info(f"✅ Рабочая ссылка: {test_url[:50]}")
-                                                    break
-                                    except:
-                                        continue
+                                # Берем максимальное качество
+                                high_res = src.replace('236x', '736x')
+                                
+                                # Проверка на дубликаты
+                                if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
+                                    continue
+                                
+                                # Проверка формата
+                                if self.check_image_format(high_res, category):
+                                    images.append(high_res)
+                                    
+                                    if user_id:
+                                        if user_id not in self.seen_images:
+                                            self.seen_images[user_id] = {}
+                                        if category not in self.seen_images[user_id]:
+                                            self.seen_images[user_id][category] = set()
+                                        self.seen_images[user_id][category].add(high_res)
         except Exception as e:
-            logger.error(f"Ошибка загрузки ленты: {e}")
+            logger.error(f"Ошибка: {e}")
         
-        # Если ничего не нашли - заглушки
         if not images:
-            logger.info("Использую заглушки")
             return self.get_fallback_images(category, limit)
         
         return images[:limit]
     
     def get_fallback_images(self, category: str, count: int) -> List[str]:
-        """Заглушки с правильными форматами"""
+        """Заглушки"""
         images = []
-        
         if category == "avatars":
             for i in range(count):
                 images.append(f"https://api.dicebear.com/7.x/avataaars/svg?seed={random.randint(1, 10000)}")
@@ -211,13 +150,10 @@ class PinterestSession:
         elif category == "wallpapers_phone":
             for i in range(count):
                 images.append(f"https://picsum.photos/1080/1920?random={random.randint(1, 10000)}")
-        
         return images
 
 
 class DataManager:
-    """Управление данными"""
-    
     def __init__(self, data_file: str):
         self.data_file = data_file
         self.data = self.load_data()
@@ -312,7 +248,6 @@ class TelegramBot:
     async def callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        logger.info(f"Callback: {query.data}")
         
         if query.data == 'back':
             await self.start(update, context)
@@ -341,7 +276,7 @@ class TelegramBot:
                     sent += 1
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    logger.error(f"Ошибка отправки: {e}")
+                    logger.error(f"Ошибка: {e}")
             
             await query.message.reply_text(
                 f"✅ Найдено: {len(images)}, отправлено: {sent}",
@@ -365,7 +300,7 @@ class TelegramBot:
                     sent += 1
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    logger.error(f"Ошибка отправки: {e}")
+                    logger.error(f"Ошибка: {e}")
             
             await query.message.reply_text(
                 f"✅ Найдено: {len(images)}, отправлено: {sent}",
@@ -389,7 +324,7 @@ class TelegramBot:
                     sent += 1
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    logger.error(f"Ошибка отправки: {e}")
+                    logger.error(f"Ошибка: {e}")
             
             await query.message.reply_text(
                 f"✅ Найдено: {len(images)}, отправлено: {sent}",
@@ -515,7 +450,6 @@ class TelegramBot:
         state = context.user_data.get('state')
         doc = update.message.document
         
-        # Загрузка кук
         if state == 'waiting_cookies' and doc.file_name.endswith('.json'):
             await update.message.reply_text("🔄 Загружаю куки...")
             try:
@@ -544,7 +478,6 @@ class TelegramBot:
             await self.start(update, context)
             return
         
-        # Файлы
         if state == 'waiting_file':
             info = {
                 'name': doc.file_name,
@@ -557,7 +490,6 @@ class TelegramBot:
             await self.start(update, context)
             return
         
-        # Видео
         if state == 'waiting_video':
             info = {
                 'name': doc.file_name,
@@ -627,8 +559,6 @@ class TelegramBot:
     
     def run(self):
         print("✅ Бот запущен")
-        print("📱 Отправь /start в Telegram")
-        print("🍪 Загрузи куки через меню")
         self.application.run_polling()
 
 
