@@ -3,13 +3,11 @@ import logging
 import json
 import asyncio
 import aiohttp
-import pickle
 import random
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from bs4 import BeautifulSoup
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -29,152 +27,69 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-CONFIG_FILE = 'config.json'
 DATA_FILE = 'bot_data.json'
-COOKIES_FILE = 'pinterest_cookies.pkl'
 GAMES = ['CS2', 'Standoff 2', 'Valorant']
 
 
 class PinterestRSS:
-    """Класс для работы с Pinterest через RSS (без API)"""
+    """Простой класс для работы с Pinterest RSS"""
     
-    def __init__(self):
-        self.seen_images = {}
-    
-    def is_ad_pin(self, title: str, description: str) -> bool:
-        """Определяет, является ли пин рекламным"""
-        ad_keywords = [
-            'ad', 'sponsored', 'промо', 'реклама', 'promo', 
-            'shop', 'buy', 'купить', 'магазин', 'store',
-            'sale', 'скидка', 'discount', 'заказать',
-            'price', 'цена', '₽', '$', 'руб', 'рублей'
-        ]
-        
-        text = (title + " " + description).lower()
-        return any(word in text for word in ad_keywords)
-    
-    def check_image_format(self, width: int, height: int, category: str) -> bool:
-        """Проверка соответствия формату"""
-        if width == 0 or height == 0:
-            return True
-        
-        ratio = width / height if height > 0 else 0
-        
-        if category == "avatars":
-            return 0.8 <= ratio <= 1.2  # Квадрат
-        
-        elif category == "wallpapers_pc":
-            if width < 800 or height < 600:
-                return False
-            return ratio > 1.3  # Горизонтальное
-        
-        elif category == "wallpapers_phone":
-            if width < 600 or height < 800:
-                return False
-            return ratio < 0.8  # Вертикальное
-        
-        return True
-    
-    async def get_image_size_from_url(self, url: str) -> Tuple[int, int]:
-        """Определяет размер изображения по URL"""
-        size_match = re.search(r'/(\d+)x/', url)
-        if size_match:
-            width = int(size_match.group(1))
-            return (width, width)
-        
-        size_match = re.search(r'/(\d+)x(\d+)/', url)
-        if size_match:
-            width = int(size_match.group(1))
-            height = int(size_match.group(2))
-            return (width, height)
-        
-        return (0, 0)
-    
-    async def search_images(self, query: str, category: str, count: int = 10, user_id: str = None) -> List[str]:
-        """Поиск изображений через RSS с фильтрацией по формату"""
+    async def search_images(self, query: str, category: str, count: int = 10) -> List[str]:
+        """Поиск изображений через RSS"""
         images = []
-        attempts = 0
-        max_attempts = 50
         
-        # Формируем RSS URL
+        # Формируем URL для поиска
         url = f"https://www.pinterest.com/search/pins/rss/?q={query.replace(' ', '+')}"
-        logger.info(f"RSS запрос: {url}")
+        logger.info(f"Поиск: {url}")
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         text = await resp.text()
-                        
-                        # Парсим RSS
                         root = ET.fromstring(text)
                         
-                        # Ищем все элементы
                         for item in root.findall('.//item'):
-                            if len(images) >= count or attempts >= max_attempts:
+                            if len(images) >= count:
                                 break
                             
-                            title = item.find('title')
-                            title_text = title.text if title is not None else ""
-                            
+                            # Получаем описание с картинкой
                             description = item.find('description')
-                            desc_text = description.text if description is not None else ""
-                            
-                            # Пропускаем рекламу
-                            if self.is_ad_pin(title_text, desc_text):
-                                attempts += 1
-                                continue
-                            
-                            # Ищем изображение в description
-                            img_match = re.search(r'<img src="([^"]+)"', desc_text)
-                            if img_match:
-                                img_url = img_match.group(1)
-                                
-                                # Конвертируем в высокое разрешение
-                                high_res = img_url.replace('236x', '736x')
-                                if '736x' not in high_res:
-                                    high_res = img_url.replace('236x', '1200x')
-                                
-                                # Проверяем размер
-                                width, height = await self.get_image_size_from_url(high_res)
-                                
-                                if self.check_image_format(width, height, category):
-                                    # Проверка на дубликаты
-                                    if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
-                                        attempts += 1
-                                        continue
-                                    
+                            if description is not None and description.text:
+                                # Ищем URL изображения
+                                img_match = re.search(r'<img src="([^"]+)"', description.text)
+                                if img_match:
+                                    img_url = img_match.group(1)
+                                    # Увеличиваем размер
+                                    high_res = img_url.replace('236x', '736x')
                                     images.append(high_res)
-                                    
-                                    # Сохраняем в историю
-                                    if user_id:
-                                        if user_id not in self.seen_images:
-                                            self.seen_images[user_id] = {}
-                                        if category not in self.seen_images[user_id]:
-                                            self.seen_images[user_id][category] = set()
-                                        self.seen_images[user_id][category].add(high_res)
-                                    
-                                    logger.info(f"✅ Найдено: {high_res[:50]}...")
-                                
-                                attempts += 1
-        
         except Exception as e:
             logger.error(f"Ошибка RSS: {e}")
         
-        logger.info(f"Найдено {len(images)} изображений по запросу '{query}'")
+        # Если ничего не нашли, возвращаем заглушки
+        if not images:
+            images = self.get_fallback_images(category, count)
+        
         return images[:count]
     
     def get_fallback_images(self, category: str, count: int) -> List[str]:
-        """Заглушки на случай ошибок"""
+        """Гарантированные изображения правильного формата"""
         images = []
         
         if category == "avatars":
+            # DiceBear API - всегда квадратные аватарки
+            styles = ['avataaars', 'bottts', 'identicon', 'micah', 'pixel-art']
             for i in range(count):
-                images.append(f"https://api.dicebear.com/7.x/avataaars/svg?seed={random.randint(1, 10000)}")
+                style = random.choice(styles)
+                images.append(f"https://api.dicebear.com/7.x/{style}/svg?seed={random.randint(1, 10000)}")
+        
         elif category == "wallpapers_pc":
+            # Picsum - всегда 16:9
             for i in range(count):
                 images.append(f"https://picsum.photos/1920/1080?random={random.randint(1, 10000)}")
+        
         elif category == "wallpapers_phone":
+            # Picsum - всегда 9:16
             for i in range(count):
                 images.append(f"https://picsum.photos/1080/1920?random={random.randint(1, 10000)}")
         
@@ -262,8 +177,6 @@ class TelegramBot:
         """Настройка обработчиков"""
         
         self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("formats", self.formats_info))
-        
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -275,21 +188,6 @@ class TelegramBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         await self.show_main_menu(update, context)
-    
-    async def formats_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Информация о форматах"""
-        info = (
-            "📐 **Требования к форматам:**\n\n"
-            "👤 **Аватарки:** квадратные 1:1\n"
-            "🖥️ **Обои ПК:** горизонтальные 16:9\n"
-            "📱 **Обои телефон:** вертикальные 9:16\n\n"
-            "🚫 Реклама автоматически фильтруется!"
-        )
-        
-        keyboard = [[InlineKeyboardButton("🔙 В меню", callback_data='back_to_main')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(info, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показ главного меню"""
@@ -319,6 +217,7 @@ class TelegramBot:
         await query.answer()
         logger.info(f"Получен callback: {query.data}")
         
+        # ========== ВОЗВРАТ В МЕНЮ ==========
         if query.data == 'back_to_main':
             await self.show_main_menu(update, context)
             return
@@ -326,8 +225,8 @@ class TelegramBot:
         # ========== ФАЙЛЫ ==========
         if query.data == 'menu_files':
             keyboard = [
-                [InlineKeyboardButton("📥 Добавить файл", callback_data='add_file_now')],
-                [InlineKeyboardButton("📋 Список файлов", callback_data='list_files_now')],
+                [InlineKeyboardButton("📥 Добавить файл", callback_data='add_file')],
+                [InlineKeyboardButton("📋 Список файлов", callback_data='list_files')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -336,35 +235,33 @@ class TelegramBot:
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+            return
         
-        elif query.data == 'add_file_now':
-            await query.edit_message_text(
-                "📁 **Отправьте файл**\n\n"
-                "Я жду ваш файл. Просто пришлите его сейчас."
-            )
+        elif query.data == 'add_file':
+            await query.edit_message_text("📁 **Отправьте файл**")
             context.user_data['state'] = 'waiting_file'
-            context.user_data['category'] = 'files'
+            return
         
-        elif query.data == 'list_files_now':
+        elif query.data == 'list_files':
             files = self.data_manager.get_items('files')
             if files:
                 text = "📁 **Список файлов:**\n\n"
-                for i, file in enumerate(files, 1):
+                for i, file in enumerate(files[-10:], 1):  # Последние 10
                     name = file.get('name', 'Без имени')
-                    date = file.get('date', '')[:16]
-                    text += f"{i}. {name}\n   📅 {date}\n"
+                    text += f"{i}. {name}\n"
             else:
-                text = "📁 **Нет загруженных файлов**"
+                text = "📁 **Нет файлов**"
             
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='menu_files')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
         
         # ========== ВИДЕО ==========
         elif query.data == 'menu_videos':
             keyboard = [
-                [InlineKeyboardButton("🎥 Добавить видео", callback_data='add_video_now')],
-                [InlineKeyboardButton("📋 Список видео", callback_data='list_videos_now')],
+                [InlineKeyboardButton("🎥 Добавить видео", callback_data='add_video')],
+                [InlineKeyboardButton("📋 Список видео", callback_data='list_videos')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -373,35 +270,33 @@ class TelegramBot:
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+            return
         
-        elif query.data == 'add_video_now':
-            await query.edit_message_text(
-                "🎥 **Отправьте видео**\n\n"
-                "Я жду ваш видеофайл. Просто пришлите его сейчас."
-            )
+        elif query.data == 'add_video':
+            await query.edit_message_text("🎥 **Отправьте видео**")
             context.user_data['state'] = 'waiting_video'
-            context.user_data['category'] = 'videos'
+            return
         
-        elif query.data == 'list_videos_now':
+        elif query.data == 'list_videos':
             videos = self.data_manager.get_items('videos')
             if videos:
                 text = "🎥 **Список видео:**\n\n"
-                for i, video in enumerate(videos, 1):
+                for i, video in enumerate(videos[-10:], 1):
                     name = video.get('name', 'Без имени')
-                    date = video.get('date', '')[:16]
-                    text += f"{i}. {name}\n   📅 {date}\n"
+                    text += f"{i}. {name}\n"
             else:
-                text = "🎥 **Нет загруженных видео**"
+                text = "🎥 **Нет видео**"
             
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='menu_videos')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
         
         # ========== СКРИНШОТЫ ==========
         elif query.data == 'menu_screenshots':
             keyboard = [
-                [InlineKeyboardButton("📸 Добавить скриншот", callback_data='add_screenshot_now')],
-                [InlineKeyboardButton("📋 Список скриншотов", callback_data='list_screenshots_now')],
+                [InlineKeyboardButton("📸 Добавить скриншот", callback_data='add_screenshot')],
+                [InlineKeyboardButton("📋 Список скриншотов", callback_data='list_screenshots')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -410,56 +305,54 @@ class TelegramBot:
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+            return
         
-        elif query.data == 'add_screenshot_now':
-            await query.edit_message_text(
-                "📸 **Отправьте скриншот**\n\n"
-                "Я жду ваше фото. Просто пришлите его сейчас."
-            )
+        elif query.data == 'add_screenshot':
+            await query.edit_message_text("📸 **Отправьте скриншот**")
             context.user_data['state'] = 'waiting_screenshot'
-            context.user_data['category'] = 'screenshots'
+            return
         
-        elif query.data == 'list_screenshots_now':
+        elif query.data == 'list_screenshots':
             screenshots = self.data_manager.get_items('screenshots')
             if screenshots:
                 text = "📸 **Список скриншотов:**\n\n"
-                for i, ss in enumerate(screenshots, 1):
+                for i, ss in enumerate(screenshots[-10:], 1):
                     caption = ss.get('caption', 'Без подписи')
-                    date = ss.get('date', '')[:16]
-                    text += f"{i}. {caption}\n   📅 {date}\n"
+                    text += f"{i}. {caption}\n"
             else:
                 text = "📸 **Нет скриншотов**"
             
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='menu_screenshots')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
         
         # ========== ЗАМЕТКИ ==========
         elif query.data == 'menu_notes':
             notes = self.data_manager.get_items('notes')
             if notes:
                 text = "📝 **Заметки**\n\n"
-                for i, note in enumerate(notes, 1):
+                for i, note in enumerate(notes[-10:], 1):
                     title = note.get('title', 'Без названия')
-                    date = note.get('date', '')[:16]
-                    text += f"{i}. {title}\n   📅 {date}\n"
+                    text += f"{i}. {title}\n"
             else:
                 text = "📝 **Нет заметок**"
             
             keyboard = [
-                [InlineKeyboardButton("➕ Добавить заметку", callback_data='add_note_now')],
+                [InlineKeyboardButton("➕ Добавить заметку", callback_data='add_note')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
         
-        elif query.data == 'add_note_now':
+        elif query.data == 'add_note':
             await query.edit_message_text(
                 "📝 **Напишите заметку**\n\n"
-                "Первая строка будет заголовком.\n"
-                "Остальной текст - содержание."
+                "Первая строка - заголовок"
             )
             context.user_data['state'] = 'waiting_note'
+            return
         
         # ========== НАСТРОЙКИ ИГР ==========
         elif query.data == 'menu_game_settings':
@@ -474,6 +367,7 @@ class TelegramBot:
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+            return
         
         elif query.data.startswith('game_'):
             game = query.data.replace('game_', '')
@@ -482,262 +376,203 @@ class TelegramBot:
             settings = self.data_manager.get_items('game_settings', game)
             
             keyboard = [
-                [InlineKeyboardButton("➕ Добавить настройку", callback_data='add_game_setting')],
-                [InlineKeyboardButton("🗑️ Удалить настройку", callback_data='delete_game_setting')],
+                [InlineKeyboardButton("➕ Добавить", callback_data='add_game_setting')],
+                [InlineKeyboardButton("🗑️ Удалить", callback_data='delete_game_setting')],
                 [InlineKeyboardButton("🔙 Назад", callback_data='menu_game_settings')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             if settings:
-                settings_text = "\n".join([f"• {s['name']}: {s['value']}" for s in settings])
-                message = f"⚙️ **{game}**\n\nТекущие настройки:\n{settings_text}\n\nВыберите действие:"
+                text = "⚙️ **Настройки**\n\n"
+                for i, s in enumerate(settings, 1):
+                    text += f"{i}. {s['name']}: {s['value']}\n"
             else:
-                message = f"⚙️ **{game}**\n\nНет сохраненных настроек.\n\nВыберите действие:"
+                text = "⚙️ **Нет настроек**"
             
-            await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            return
         
         elif query.data == 'add_game_setting':
             await query.edit_message_text(
-                "⚙️ Отправьте настройку в формате:\n`Название: значение`\n\nНапример: `Чувствительность: 2.5`",
-                parse_mode='Markdown'
+                "⚙️ Формат: Название: значение\n"
+                "Пример: Чувствительность: 2.5"
             )
             context.user_data['state'] = 'waiting_game_setting'
+            return
         
         elif query.data == 'delete_game_setting':
             game = context.user_data.get('current_game')
             settings = self.data_manager.get_items('game_settings', game)
             
             if not settings:
-                await query.edit_message_text(
-                    "❌ Нет настроек для удаления.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')
-                    ]])
-                )
+                await query.edit_message_text("❌ Нет настроек")
                 return
             
             keyboard = []
             for i, setting in enumerate(settings):
                 keyboard.append([InlineKeyboardButton(
-                    f"🗑️ {setting['name']}: {setting['value']}",
-                    callback_data=f'delete_setting_{i}'
+                    f"❌ {setting['name']}",
+                    callback_data=f'delete_{i}'
                 )])
             keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                f"🗑️ **Выберите настройку для удаления из {game}:**",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text("Выберите для удаления:", reply_markup=reply_markup)
+            return
         
-        elif query.data.startswith('delete_setting_'):
-            index = int(query.data.replace('delete_setting_', ''))
+        elif query.data.startswith('delete_'):
+            index = int(query.data.replace('delete_', ''))
             game = context.user_data.get('current_game')
             
             if self.data_manager.delete_item('game_settings', index, game):
-                await query.edit_message_text(
-                    f"✅ Настройка удалена из {game}!",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')
-                    ]])
-                )
+                await query.edit_message_text("✅ Удалено")
             else:
-                await query.edit_message_text(
-                    "❌ Ошибка при удалении.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')
-                    ]])
-                )
+                await query.edit_message_text("❌ Ошибка")
+            
+            # Возврат в меню игры
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text("Вернуться:", reply_markup=reply_markup)
+            return
         
         # ========== PINTEREST КАТЕГОРИИ ==========
         elif query.data in ['menu_avatars', 'menu_wallpapers_pc', 'menu_wallpapers_phone']:
             category_map = {
-                'menu_avatars': ('avatars', 'АВАТАРОК', 'аниме аватарка'),
-                'menu_wallpapers_pc': ('wallpapers_pc', 'ОБОЕВ ДЛЯ ПК', 'аниме обои для пк'),
-                'menu_wallpapers_phone': ('wallpapers_phone', 'ОБОЕВ ДЛЯ ТЕЛЕФОНА', 'аниме обои для телефона')
+                'menu_avatars': ('avatars', 'аватарок', 'аниме аватарка'),
+                'menu_wallpapers_pc': ('wallpapers_pc', 'обоев для ПК', 'аниме обои пк'),
+                'menu_wallpapers_phone': ('wallpapers_phone', 'обоев для телефона', 'аниме обои вертикальные')
             }
             
             category, ru_name, search_query = category_map[query.data]
-            await self.fetch_pinterest_images(update, context, category, ru_name, search_query)
+            await self.fetch_images(update, context, category, ru_name, search_query)
+            return
     
-    async def fetch_pinterest_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                                    category: str, ru_name: str, search_query: str):
-        """Получение изображений через RSS"""
+    async def fetch_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                          category: str, ru_name: str, search_query: str):
+        """Получение и отправка изображений"""
         query = update.callback_query
-        user_id = str(update.effective_user.id)
         
-        await query.edit_message_text(
-            f"🔄 Ищу {ru_name}...\n"
-            f"📸 Фильтрую рекламу\n"
-            f"📐 Проверяю формат",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text(f"🔄 Ищу {ru_name}...")
         
-        # Поиск изображений
-        images = await self.pinterest.search_images(search_query, category, count=12, user_id=user_id)
+        # Пробуем найти через Pinterest
+        images = await self.pinterest.search_images(search_query, category, count=10)
         
-        # Если ничего не нашли, используем заглушки
+        # Если ничего нет - заглушки
         if not images:
-            logger.info(f"Не найдено изображений для {category}, использую заглушки")
             images = self.pinterest.get_fallback_images(category, 6)
+            source = "заглушки"
+        else:
+            source = "Pinterest"
         
-        # Отправляем изображения
-        sent_count = 0
-        for i, img_url in enumerate(images[:6]):
+        # Отправляем
+        sent = 0
+        for img in images[:6]:
             try:
-                format_desc = {
-                    'avatars': '✅ квадратное 1:1',
-                    'wallpapers_pc': '✅ горизонтальное 16:9',
-                    'wallpapers_phone': '✅ вертикальное 9:16'
-                }.get(category, '')
-                
-                caption = f"🎨 {ru_name} #{i+1}\n📐 {format_desc}"
-                await query.message.reply_photo(photo=img_url, caption=caption)
-                sent_count += 1
+                await query.message.reply_photo(photo=img)
+                sent += 1
                 await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Ошибка отправки фото: {e}")
+            except:
+                pass
         
-        keyboard = [
-            [InlineKeyboardButton("🔄 Еще", callback_data=f'menu_{category}')],
-            [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
-        ]
+        keyboard = [[InlineKeyboardButton("🔄 Еще", callback_data=f'menu_{category}')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.message.reply_text(
-            f"✅ Найдено {len(images)} изображений!\n"
-            f"📸 Без рекламы\n"
-            f"📐 С проверенным форматом\n"
-            f"Отправлено: {sent_count}",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
+            f"✅ Найдено {len(images)} ({source})\nОтправлено {sent}",
+            reply_markup=reply_markup
         )
     
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка документов"""
         state = context.user_data.get('state')
-        document = update.message.document
         
-        # Обработка файлов
         if state == 'waiting_file':
-            category = context.user_data.get('category', 'files')
-            
-            file_info = {
-                'name': document.file_name,
-                'file_id': document.file_id,
-                'file_size': document.file_size,
-                'mime_type': document.mime_type,
+            doc = update.message.document
+            info = {
+                'name': doc.file_name,
+                'file_id': doc.file_id,
                 'date': datetime.now().isoformat()
             }
-            
-            self.data_manager.add_item(category, file_info)
-            await update.message.reply_text(f"✅ Файл '{document.file_name}' сохранен!")
+            self.data_manager.add_item('files', info)
+            await update.message.reply_text(f"✅ Файл сохранен")
             
             context.user_data['state'] = None
-            context.user_data['category'] = None
             await self.show_main_menu(update, context)
         
-        # Обработка видео
         elif state == 'waiting_video':
-            category = context.user_data.get('category', 'videos')
-            
-            file_info = {
-                'name': document.file_name,
-                'file_id': document.file_id,
-                'file_size': document.file_size,
-                'mime_type': document.mime_type,
+            doc = update.message.document
+            info = {
+                'name': doc.file_name,
+                'file_id': doc.file_id,
                 'date': datetime.now().isoformat()
             }
-            
-            self.data_manager.add_item(category, file_info)
-            await update.message.reply_text(f"✅ Видео '{document.file_name}' сохранено!")
+            self.data_manager.add_item('videos', info)
+            await update.message.reply_text(f"✅ Видео сохранено")
             
             context.user_data['state'] = None
-            context.user_data['category'] = None
             await self.show_main_menu(update, context)
         
         else:
-            await update.message.reply_text("❌ Сначала выберите 'Добавить файл' или 'Добавить видео' в меню.")
+            await update.message.reply_text("Сначала выберите действие в меню")
     
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка фотографий"""
+        """Обработка фото"""
         state = context.user_data.get('state')
         
         if state == 'waiting_screenshot':
             photo = update.message.photo[-1]
-            caption = update.message.caption or "Без подписи"
-            
-            photo_info = {
+            info = {
                 'file_id': photo.file_id,
-                'caption': caption,
+                'caption': update.message.caption or '',
                 'date': datetime.now().isoformat()
             }
-            
-            self.data_manager.add_item('screenshots', photo_info)
-            await update.message.reply_text("✅ Скриншот сохранен!")
+            self.data_manager.add_item('screenshots', info)
+            await update.message.reply_text(f"✅ Скриншот сохранен")
             
             context.user_data['state'] = None
             await self.show_main_menu(update, context)
         
         else:
-            await update.message.reply_text("❌ Сначала выберите 'Добавить скриншот' в меню.")
+            await update.message.reply_text("Сначала выберите 'Добавить скриншот'")
     
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка текстовых сообщений"""
+        """Обработка текста"""
         state = context.user_data.get('state')
         text = update.message.text
         
         if state == 'waiting_note':
             lines = text.split('\n', 1)
-            title = lines[0][:50] if lines[0] else "Без названия"
-            content = lines[1] if len(lines) > 1 else ""
+            title = lines[0][:50]
+            content = lines[1] if len(lines) > 1 else ''
             
-            note = {
-                'title': title,
-                'content': content,
-                'date': datetime.now().isoformat()
-            }
-            
+            note = {'title': title, 'content': content, 'date': datetime.now().isoformat()}
             self.data_manager.add_item('notes', note)
-            await update.message.reply_text(f"✅ Заметка '{title}' сохранена!")
+            await update.message.reply_text(f"✅ Заметка сохранена")
             
             context.user_data['state'] = None
             await self.show_main_menu(update, context)
         
         elif state == 'waiting_game_setting':
             if ':' in text:
-                name, value = text.split(':', 1)
+                name, val = text.split(':', 1)
                 game = context.user_data.get('current_game')
-                
-                setting = {
-                    'name': name.strip(),
-                    'value': value.strip(),
-                    'date': datetime.now().isoformat()
-                }
-                
+                setting = {'name': name.strip(), 'value': val.strip(), 'date': datetime.now().isoformat()}
                 self.data_manager.add_item('game_settings', setting, game)
-                await update.message.reply_text(f"✅ Настройка '{name.strip()}' добавлена в {game}!")
-                
-                context.user_data['state'] = None
+                await update.message.reply_text(f"✅ Добавлено")
             else:
-                await update.message.reply_text("❌ Неверный формат. Используйте: Название: значение")
+                await update.message.reply_text("❌ Формат: Название: значение")
             
+            context.user_data['state'] = None
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"Вернуться к {game}:", reply_markup=reply_markup)
+            await update.message.reply_text("Вернуться", reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик ошибок"""
         logger.error(f"Ошибка: {context.error}")
         if update and update.effective_message:
-            await update.effective_message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
+            await update.effective_message.reply_text("❌ Ошибка")
     
     def run(self):
-        """Запуск бота"""
-        print("✅ Бот запущен...")
-        print("📱 Отправьте /start в Telegram")
-        
+        print("✅ Бот запущен")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -747,14 +582,10 @@ class TelegramBot:
 
 
 def main():
-    """Главная функция"""
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    
     if not TOKEN:
-        print("❌ Ошибка: Не установлен TELEGRAM_BOT_TOKEN")
-        print("Установите токен: set TELEGRAM_BOT_TOKEN=ваш_токен")
+        print("❌ Нет токена")
         return
-    
     bot = TelegramBot(TOKEN)
     bot.run()
 
