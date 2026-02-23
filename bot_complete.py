@@ -34,12 +34,12 @@ GAMES = ['CS2', 'Standoff 2', 'Valorant']
 
 
 class PinterestSession:
-    """Класс для работы с Pinterest через куки (личные рекомендации)"""
+    """Класс для работы с Pinterest через куки"""
     
     def __init__(self):
         self.cookies = None
         self.is_authenticated = False
-        self.seen_images = {}  # Для отслеживания уже показанных изображений
+        self.seen_images = {}
         self.load_cookies()
     
     def load_cookies(self):
@@ -89,7 +89,6 @@ class PinterestSession:
     
     async def get_image_size(self, url: str) -> Tuple[int, int]:
         """Определение размера изображения по URL"""
-        # Пробуем найти размер в URL
         size_match = re.search(r'/(\d+)x/', url)
         if size_match:
             width = int(size_match.group(1))
@@ -106,41 +105,35 @@ class PinterestSession:
     def check_format(self, width: int, height: int, category: str) -> bool:
         """Проверка соответствия формату"""
         if width == 0 or height == 0:
-            return True  # Если размер неизвестен, пропускаем
+            return True
         
         ratio = width / height if height > 0 else 0
         
         if category == "avatars":
-            # Квадрат 1:1 (с допуском)
+            # Квадрат 1:1
             return 0.8 <= ratio <= 1.2
         
         elif category == "wallpapers_pc":
-            # Горизонтальные (ширина > высоты)
+            # Горизонтальные
             return ratio > 1.3 and width >= 800
         
         elif category == "wallpapers_phone":
-            # Вертикальные (высота > ширины)
+            # Вертикальные
             return ratio < 0.8 and height >= 800
         
         return True
     
     async def get_my_feed(self, category: str, limit: int = 10, user_id: str = None) -> List[str]:
         """
-        Парсинг личной ленты Pinterest (ТВОИ РЕКОМЕНДАЦИИ)
+        ТВОИ ЛИЧНЫЕ РЕКОМЕНДАЦИИ с проверкой ссылок
         """
         if not self.is_authenticated:
-            logger.warning("Нет авторизации")
+            logger.warning("Нет авторизации, использую заглушки")
             return self.get_fallback_images(category, limit)
         
         images = []
-        found = 0
-        attempts = 0
-        max_attempts = 50
-        
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
         try:
@@ -154,9 +147,8 @@ class PinterestSession:
                         html = await resp.text()
                         soup = BeautifulSoup(html, 'html.parser')
                         
-                        # Ищем все картинки
                         for img in soup.find_all('img', {'src': True, 'alt': True}):
-                            if len(images) >= limit or attempts >= max_attempts:
+                            if len(images) >= limit:
                                 break
                             
                             src = img.get('src', '')
@@ -164,38 +156,38 @@ class PinterestSession:
                             
                             # Проверка на рекламу
                             if self.is_ad_pin(img, alt, src):
-                                attempts += 1
                                 continue
                             
                             # Только Pinterest картинки
                             if 'pinimg.com' in src and '236x' in src:
-                                high_res = src.replace('236x', '736x')
-                                
-                                # Проверка на дубликаты
-                                if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
-                                    attempts += 1
-                                    continue
-                                
-                                # Проверка формата
-                                w, h = await self.get_image_size(high_res)
-                                if self.check_format(w, h, category):
-                                    images.append(high_res)
-                                    
-                                    # Запоминаем, что показали
-                                    if user_id:
-                                        if user_id not in self.seen_images:
-                                            self.seen_images[user_id] = {}
-                                        if category not in self.seen_images[user_id]:
-                                            self.seen_images[user_id][category] = set()
-                                        self.seen_images[user_id][category].add(high_res)
-                                    
-                                    found += 1
-                                    logger.info(f"✅ Найдено подходящее: {w}x{h}")
-                                
-                                attempts += 1
-                        
-                        logger.info(f"Всего найдено: {len(images)}")
-        
+                                # Пробуем разные размеры
+                                for size in ['736x', '564x', 'originals']:
+                                    test_url = src.replace('236x', size)
+                                    try:
+                                        # Проверяем доступность ссылки
+                                        async with session.head(test_url, timeout=3) as check:
+                                            if check.status == 200:
+                                                # Проверка на дубликаты
+                                                if user_id and test_url in self.seen_images.get(user_id, {}).get(category, set()):
+                                                    break
+                                                
+                                                # Проверка формата
+                                                w, h = await self.get_image_size(test_url)
+                                                if self.check_format(w, h, category):
+                                                    images.append(test_url)
+                                                    
+                                                    # Запоминаем
+                                                    if user_id:
+                                                        if user_id not in self.seen_images:
+                                                            self.seen_images[user_id] = {}
+                                                        if category not in self.seen_images[user_id]:
+                                                            self.seen_images[user_id][category] = set()
+                                                        self.seen_images[user_id][category].add(test_url)
+                                                    
+                                                    logger.info(f"✅ Рабочая ссылка: {test_url[:50]}")
+                                                    break
+                                    except:
+                                        continue
         except Exception as e:
             logger.error(f"Ошибка загрузки ленты: {e}")
         
@@ -336,7 +328,7 @@ class TelegramBot:
             context.user_data['state'] = 'waiting_cookies'
             return
         
-        # ===== АВАТАРКИ (ТВОИ ЛИЧНЫЕ) =====
+        # ===== АВАТАРКИ =====
         if query.data == 'menu_avatars':
             await query.edit_message_text("🔄 Загружаю твои личные рекомендации...")
             
@@ -349,7 +341,7 @@ class TelegramBot:
                     sent += 1
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    logger.error(f"Ошибка: {e}")
+                    logger.error(f"Ошибка отправки: {e}")
             
             await query.message.reply_text(
                 f"✅ Найдено: {len(images)}, отправлено: {sent}",
@@ -372,11 +364,11 @@ class TelegramBot:
                     await query.message.reply_photo(photo=url, caption="🖥️ Твоя рекомендация")
                     sent += 1
                     await asyncio.sleep(0.5)
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Ошибка отправки: {e}")
             
             await query.message.reply_text(
-                f"✅ Найдено: {len(images)}",
+                f"✅ Найдено: {len(images)}, отправлено: {sent}",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔄 Еще", callback_data='menu_pc'),
                     InlineKeyboardButton("🔙 Назад", callback_data='back')
@@ -396,11 +388,11 @@ class TelegramBot:
                     await query.message.reply_photo(photo=url, caption="📱 Твоя рекомендация")
                     sent += 1
                     await asyncio.sleep(0.5)
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Ошибка отправки: {e}")
             
             await query.message.reply_text(
-                f"✅ Найдено: {len(images)}",
+                f"✅ Найдено: {len(images)}, отправлено: {sent}",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔄 Еще", callback_data='menu_phone'),
                     InlineKeyboardButton("🔙 Назад", callback_data='back')
@@ -515,7 +507,6 @@ class TelegramBot:
             else:
                 await query.edit_message_text("❌ Ошибка")
             
-            # Возврат в меню игры
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=f'game_{game}')]]
             await query.message.reply_text("Вернуться", reply_markup=InlineKeyboardMarkup(keyboard))
             return
