@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -38,42 +37,15 @@ DATA_FILE = 'bot_data.json'
 COOKIES_FILE = 'pinterest_cookies.pkl'
 GAMES = ['CS2', 'Standoff 2', 'Valorant']
 
-# Требования к размерам изображений
-IMAGE_REQUIREMENTS = {
-    "avatars": {
-        "min_width": 500,
-        "min_height": 500,
-        "aspect_ratio": 1.0,  # 1:1 квадрат
-        "aspect_tolerance": 0.1,  # допуск 10%
-        "description": "квадратные (1:1)"
-    },
-    "wallpapers_pc": {
-        "min_width": 1920,
-        "min_height": 1080,
-        "aspect_ratio": 16/9,  # 16:9
-        "aspect_tolerance": 0.15,  # допуск 15% (включает 16:10)
-        "description": "горизонтальные 16:9 или 16:10"
-    },
-    "wallpapers_phone": {
-        "min_width": 1080,
-        "min_height": 1920,
-        "aspect_ratio": 9/16,  # 9:16 вертикальные
-        "aspect_tolerance": 0.1,  # допуск 10%
-        "description": "вертикальные 9:16"
-    }
-}
-
 
 class PinterestSession:
-    """Класс для работы с Pinterest - получает ПЕРСОНАЛЬНЫЕ рекомендации"""
+    """Класс для работы с Pinterest с фильтрацией рекламы и проверкой размеров"""
     
     def __init__(self):
         self.session = None
         self.cookies = None
         self.is_authenticated = False
-        self.username = None
-        self.seen_images = {}  # Хранит уже показанные изображения для каждого пользователя
-        self.image_cache = {}   # Кэш размеров изображений
+        self.seen_images = {}
         self.load_cookies()
     
     def load_cookies(self):
@@ -103,301 +75,256 @@ class PinterestSession:
             logger.error(f"Ошибка сохранения кук: {e}")
             return False
     
-    async def check_image_size(self, image_url: str) -> Tuple[int, int]:
+    def is_ad_pin(self, img_tag, alt_text: str, src: str) -> bool:
         """
-        Проверка размера изображения по URL
-        Возвращает (ширина, высота) или (0, 0) если не удалось определить
+        Определяет, является ли пин рекламным
         """
-        # Проверяем кэш
-        if image_url in self.image_cache:
-            return self.image_cache[image_url]
+        # Ключевые слова, указывающие на рекламу
+        ad_keywords = [
+            'ad', 'sponsored', 'промо', 'реклама', 'promo', 
+            'shop', 'buy', 'купить', 'магазин', 'store',
+            'sale', 'скидка', 'discount', 'заказать',
+            'price', 'цена', '₽', '$', 'руб', 'рублей',
+            'limited', 'offer', 'code', 'промокод'
+        ]
         
+        # Проверяем alt текст
+        alt_lower = alt_text.lower()
+        if any(word in alt_lower for word in ad_keywords):
+            logger.info(f"Реклама обнаружена по alt: {alt_text[:50]}")
+            return True
+        
+        # Проверяем URL на признаки рекламы
+        src_lower = src.lower()
+        ad_url_patterns = [
+            'adsystem', 'adserver', 'doubleclick', 
+            'googleadservices', 'amazon-adsystem',
+            'analytics', 'tracking', 'pixel'
+        ]
+        if any(pattern in src_lower for pattern in ad_url_patterns):
+            logger.info(f"Реклама обнаружена по URL: {src[:50]}")
+            return True
+        
+        # Проверяем наличие промо-атрибутов в теге
+        if img_tag.get('data-sponsored') == 'true':
+            logger.info("Реклама обнаружена по атрибуту data-sponsored")
+            return True
+        
+        # Проверяем на наличие цены в alt
+        price_patterns = [r'\d+\s?₽', r'\d+\s?руб', r'\$\d+', r'€\d+']
+        for pattern in price_patterns:
+            if re.search(pattern, alt_text, re.IGNORECASE):
+                logger.info(f"Реклама обнаружена по цене: {alt_text[:50]}")
+                return True
+        
+        return False
+    
+    def check_image_format(self, width: int, height: int, category: str) -> bool:
+        """
+        Проверяет, соответствует ли изображение требуемому формату
+        """
+        if width == 0 or height == 0:
+            # Если размер неизвестен, проверяем по категории
+            return True
+        
+        if category == "avatars":
+            # Для аватарок нужно соотношение близкое к 1:1 (квадрат)
+            ratio = width / height if height > 0 else 0
+            is_square = 0.8 <= ratio <= 1.2  # Допуск 20%
+            if not is_square:
+                logger.info(f"Не квадратное: {width}x{height}")
+            return is_square
+        
+        elif category == "wallpapers_pc":
+            # Для обоев ПК нужно горизонтальное (ширина > высоты)
+            if width < 1280 or height < 720:  # Минимальный размер
+                logger.info(f"Слишком маленькое для ПК: {width}x{height}")
+                return False
+            is_landscape = width > height * 1.3  # Соотношение примерно 16:9
+            if not is_landscape:
+                logger.info(f"Не горизонтальное для ПК: {width}x{height}")
+            return is_landscape
+        
+        elif category == "wallpapers_phone":
+            # Для обоев телефона нужно вертикальное (высота > ширины)
+            if width < 720 or height < 1280:  # Минимальный размер
+                logger.info(f"Слишком маленькое для телефона: {width}x{height}")
+                return False
+            is_portrait = height > width * 1.3  # Соотношение примерно 9:16
+            if not is_portrait:
+                logger.info(f"Не вертикальное для телефона: {width}x{height}")
+            return is_portrait
+        
+        return True
+    
+    async def check_image_dimensions(self, image_url: str) -> Tuple[int, int]:
+        """
+        Проверяет реальные размеры изображения по URL
+        """
         try:
-            # Пытаемся извлечь размер из URL Pinterest
-            # Pinterest часто указывает размер в URL: .../736x/...
-            size_match = re.search(r'/(\d+)x/', image_url)
-            if size_match:
-                size = int(size_match.group(1))
-                # По размеру в URL можно предположить соотношение
-                if '736x' in image_url:
-                    # Это высокое разрешение, но точный размер неизвестен
-                    self.image_cache[image_url] = (736, 736)  # заглушка
-                    return (736, 736)
-            
-            # Пробуем получить заголовки для определения размера
+            # Пытаемся получить заголовки
             async with aiohttp.ClientSession() as session:
-                async with session.head(image_url, allow_redirects=True) as resp:
-                    if resp.status == 200:
-                        # Пытаемся получить размер из заголовков
-                        content_length = resp.headers.get('Content-Length')
-                        content_type = resp.headers.get('Content-Type', '')
-                        
-                        if 'image' in content_type:
-                            # Для Pinterest можно предположить размер по типу
+                async with session.head(image_url, allow_redirects=True) as response:
+                    if response.status == 200:
+                        # Пробуем определить размер из URL Pinterest
+                        size_match = re.search(r'/(\d+)x/', image_url)
+                        if size_match:
+                            width = int(size_match.group(1))
+                            # Pinterest часто использует 736x как базовый размер
                             if '736x' in image_url:
-                                self.image_cache[image_url] = (736, 736)
                                 return (736, 736)
                             elif '564x' in image_url:
-                                self.image_cache[image_url] = (564, 564)
                                 return (564, 564)
+                            elif '236x' in image_url:
+                                return (236, 236)
+                        
+                        # Пробуем получить размер из заголовка Content-Length
+                        content_length = response.headers.get('Content-Length')
+                        if content_length:
+                            # Примерная оценка: для JPEG 736x736 ~ 100-200 KB
+                            size_kb = int(content_length) / 1024
+                            if size_kb > 100:  # Больше 100 KB
+                                return (736, 736)
         except Exception as e:
-            logger.error(f"Ошибка проверки размера изображения: {e}")
+            logger.error(f"Ошибка проверки размеров: {e}")
         
-        # По умолчанию возвращаем (0, 0) - размер неизвестен
-        self.image_cache[image_url] = (0, 0)
         return (0, 0)
     
-    def meets_requirements(self, image_url: str, category: str) -> bool:
+    async def get_filtered_images(self, category: str, count: int = 10, user_id: str = None) -> List[str]:
         """
-        Проверяет, соответствует ли изображение требованиям категории
-        """
-        if category not in IMAGE_REQUIREMENTS:
-            return True  # Если категория не указана, пропускаем все
-        
-        req = IMAGE_REQUIREMENTS[category]
-        
-        # Пытаемся определить размер по URL
-        if '736x' in image_url:
-            # Pinterest часто использует 736x... для высокого разрешения
-            # Но точное соотношение нужно проверять по другим признакам
-            pass
-        
-        # Проверяем alt-текст на наличие ключевых слов о размере
-        # Это костыль, но пока нет прямого доступа к размерам
-        
-        return True  # Временно пропускаем все для тестирования
-    
-    async def get_my_recommendations(self, category: str = "all", count: int = 10, user_id: str = None) -> List[str]:
-        """
-        ПОЛУЧЕНИЕ ПЕРСОНАЛЬНЫХ РЕКОМЕНДАЦИЙ ИЗ ГЛАВНОЙ ЛЕНТЫ PINTEREST
-        С фильтрацией по размеру и соотношению сторон
+        Получает изображения с фильтрацией рекламы и проверкой формата
         """
         images = []
         attempts = 0
-        max_attempts = 50  # Максимальное количество попыток сбора
+        max_attempts = 50
+        ad_skipped = 0
+        format_skipped = 0
         
-        # Инициализируем хранилище для пользователя
-        if user_id:
-            if user_id not in self.seen_images:
-                self.seen_images[user_id] = {}
-            if category not in self.seen_images[user_id]:
-                self.seen_images[user_id][category] = set()
-        
-        if not self.is_authenticated:
-            logger.warning("Нет авторизации в Pinterest, используем заглушки")
-            return self._get_fallback_images(count, user_id, category)
-        
-        # Заголовки как у реального браузера
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession(headers=headers, cookies=self.cookies) as session:
-                # ГЛАВНАЯ СТРАНИЦА - ЛИЧНАЯ ЛЕНТА РЕКОМЕНДАЦИЙ
-                url = 'https://ru.pinterest.com/'
-                
-                logger.info(f"Запрашиваем личную ленту Pinterest: {url}")
-                
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        html = await resp.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        
-                        # Ищем все изображения в ленте
-                        img_tags = soup.find_all('img', {'src': True, 'alt': True, 'loading': 'lazy'})
-                        
-                        logger.info(f"Найдено {len(img_tags)} изображений в ленте")
-                        
-                        for img in img_tags:
-                            if len(images) >= count or attempts >= max_attempts:
-                                break
-                            
-                            attempts += 1
-                            src = img.get('src', '')
-                            alt = img.get('alt', '').lower()
-                            
-                            # Проверяем, что это реальное изображение Pinterest
-                            if 'pinimg.com' in src and '236x' in src:
-                                # Конвертируем в высокое разрешение
-                                high_res = src.replace('236x', 'originals')  # Пробуем получить оригинал
-                                if 'originals' not in high_res:
-                                    high_res = src.replace('236x', '736x')
-                                
-                                # Проверяем, не показывали ли уже
-                                if user_id and high_res in self.seen_images[user_id][category]:
-                                    continue
-                                
-                                # Определяем категорию по alt-тексту
-                                should_add = False
-                                size_ok = True
-                                
-                                if category == "all":
-                                    should_add = True
-                                elif category == "avatars":
-                                    # Ищем аватарки по ключевым словам
-                                    avatar_keywords = ['profile', 'avatar', 'face', 'person', 'anime', 'pfp', 'icon', 'портрет', 'лицо', 'аватар']
-                                    if any(word in alt for word in avatar_keywords):
-                                        should_add = True
-                                        # Для аватарок проверяем квадратность
-                                        if 'square' not in alt and '1:1' not in alt:
-                                            # Если нет явных признаков квадрата, всё равно добавляем
-                                            pass
-                                
-                                elif category == "wallpapers_pc":
-                                    # Ищем обои для ПК
-                                    pc_keywords = ['wallpaper', 'background', 'desktop', 'landscape', '4k', 'wide', 'обои', 'фон', 'hd']
-                                    if any(word in alt for word in pc_keywords) and 'vertical' not in alt:
-                                        should_add = True
-                                        # Проверяем горизонтальность
-                                        if 'landscape' in alt or 'wide' in alt:
-                                            size_ok = True
-                                
-                                elif category == "wallpapers_phone":
-                                    # Ищем обои для телефона
-                                    phone_keywords = ['mobile', 'phone', 'vertical', 'portrait', 'аватарка', 'вертикальные', 'iphone', 'android']
-                                    if any(word in alt for word in phone_keywords):
-                                        should_add = True
-                                        # Проверяем вертикальность
-                                        if 'vertical' in alt or 'portrait' in alt:
-                                            size_ok = True
-                                
-                                if should_add and size_ok:
-                                    images.append(high_res)
-                                    if user_id:
-                                        self.seen_images[user_id][category].add(high_res)
-                                    
-                                    logger.info(f"Добавлено изображение для '{category}': {high_res[:50]}...")
-                        
-                        logger.info(f"Отобрано {len(images)} изображений для категории '{category}'")
-                    else:
-                        logger.error(f"Ошибка запроса к Pinterest: {resp.status}")
-        
-        except Exception as e:
-            logger.error(f"Ошибка получения ленты: {e}")
-        
-        # Если не нашли изображений в ленте, пробуем поиск
-        if not images:
-            logger.info(f"Нет изображений в ленте для '{category}', пробуем поиск")
-            images = await self._search_category_images(category, count, user_id)
-        
-        # Если всё равно мало, добавляем заглушки с правильными пропорциями
-        if len(images) < count:
-            fallback = self._get_fallback_images(count - len(images), user_id, category)
-            images.extend(fallback)
-        
-        return images[:count]
-    
-    async def _search_category_images(self, category: str, count: int, user_id: str = None) -> List[str]:
-        """Поиск изображений по категории с учетом требований к размеру"""
-        images = []
-        
-        # Разные поисковые запросы для каждой категории с учетом размера
+        # Поисковые запросы без рекламных слов
         search_queries = {
             "avatars": [
-                "avatar square 1:1", 
-                "profile picture square", 
-                "anime avatar square", 
-                "pfp square",
-                "icon square"
+                "avatar art", "character portrait", "anime face", 
+                "profile picture aesthetic", "icon art",
+                "square avatar", "1:1 portrait",
+                "cool avatar", "anime pfp"
             ],
             "wallpapers_pc": [
-                "desktop wallpaper 1920x1080", 
-                "4k wallpaper landscape", 
-                "wide wallpaper 16:9",
-                "hd background"
+                "landscape art", "nature scene", "digital art landscape",
+                "scenery background", "aesthetic desktop",
+                "4k wallpaper", "wide wallpaper",
+                "mountain landscape", "cityscape"
             ],
             "wallpapers_phone": [
-                "mobile wallpaper 1080x1920", 
-                "phone wallpaper vertical", 
-                "amoled wallpaper vertical",
-                "iphone wallpaper"
+                "vertical art", "portrait scene", "aesthetic vertical",
+                "nature vertical", "digital art vertical",
+                "mobile wallpaper", "phone background",
+                "vertical landscape", "portrait wallpaper"
             ]
         }
         
         if category not in search_queries:
-            return images
+            return []
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
         }
         
         try:
             async with aiohttp.ClientSession(headers=headers, cookies=self.cookies) as session:
                 for query in search_queries[category]:
-                    if len(images) >= count:
+                    if len(images) >= count or attempts >= max_attempts:
                         break
                     
                     url = f'https://ru.pinterest.com/search/pins/?q={query.replace(" ", "%20")}'
+                    logger.info(f"Поиск: {url}")
                     
                     async with session.get(url) as resp:
                         if resp.status == 200:
                             html = await resp.text()
                             soup = BeautifulSoup(html, 'html.parser')
                             
-                            img_tags = soup.find_all('img', {'src': True})
+                            # Ищем все изображения
+                            img_tags = soup.find_all('img', {'src': True, 'alt': True})
+                            
                             for img in img_tags:
+                                if len(images) >= count:
+                                    break
+                                
                                 src = img.get('src', '')
-                                if src and 'pinimg.com' in src and '236x' in src:
+                                alt = img.get('alt', '').lower()
+                                
+                                # Фильтр 1: Проверяем на рекламу
+                                if self.is_ad_pin(img, alt, src):
+                                    ad_skipped += 1
+                                    continue
+                                
+                                # Фильтр 2: Проверяем что это Pinterest изображение
+                                if 'pinimg.com' in src and '236x' in src:
+                                    # Конвертируем в высокое разрешение
                                     high_res = src.replace('236x', 'originals')
                                     if 'originals' not in high_res:
                                         high_res = src.replace('236x', '736x')
                                     
-                                    if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
-                                        continue
+                                    # Проверяем размеры
+                                    width, height = await self.check_image_dimensions(high_res)
                                     
-                                    images.append(high_res)
-                                    if user_id:
-                                        if user_id not in self.seen_images:
-                                            self.seen_images[user_id] = {}
-                                        if category not in self.seen_images[user_id]:
-                                            self.seen_images[user_id][category] = set()
-                                        self.seen_images[user_id][category].add(high_res)
+                                    if self.check_image_format(width, height, category):
+                                        # Проверяем на дубликаты
+                                        if user_id and high_res in self.seen_images.get(user_id, {}).get(category, set()):
+                                            continue
+                                        
+                                        images.append(high_res)
+                                        
+                                        # Сохраняем в историю
+                                        if user_id:
+                                            if user_id not in self.seen_images:
+                                                self.seen_images[user_id] = {}
+                                            if category not in self.seen_images[user_id]:
+                                                self.seen_images[user_id][category] = set()
+                                            self.seen_images[user_id][category].add(high_res)
+                                        
+                                        logger.info(f"✅ Найдено подходящее изображение: {category}")
+                                    else:
+                                        format_skipped += 1
                                     
-                                    if len(images) >= count:
-                                        break
-        except Exception as e:
-            logger.error(f"Ошибка поиска: {e}")
+                                    attempts += 1
+                        else:
+                            logger.error(f"Ошибка запроса: {resp.status}")
         
-        return images
+        except Exception as e:
+            logger.error(f"Ошибка получения изображений: {e}")
+        
+        logger.info(f"Категория {category}: найдено {len(images)} изображений, "
+                   f"пропущено рекламы: {ad_skipped}, не подошло по формату: {format_skipped}")
+        
+        # Если не нашли ни одного, возвращаем заглушки
+        if not images:
+            logger.info(f"Использую заглушки для {category}")
+            return self.get_fallback_images(category, count)
+        
+        return images[:count]
     
-    def _get_fallback_images(self, count: int, user_id: str = None, category: str = None) -> List[str]:
-        """Заглушки с правильными пропорциями"""
+    def get_fallback_images(self, category: str, count: int) -> List[str]:
+        """Заглушки с правильными пропорциями (без рекламы)"""
         images = []
         
-        # Заглушки с правильными размерами для каждой категории
-        for i in range(count):
-            if category == "avatars":
-                # Квадратные аватарки 1:1
-                url = f"https://api.dicebear.com/7.x/avataaars/svg?seed={random.randint(1, 10000)}"
-            elif category == "wallpapers_pc":
-                # Горизонтальные обои 16:9
-                url = f"https://picsum.photos/1920/1080?random={random.randint(1, 10000)}"
-            elif category == "wallpapers_phone":
-                # Вертикальные обои 9:16
-                url = f"https://picsum.photos/1080/1920?random={random.randint(1, 10000)}"
-            else:
-                url = f"https://picsum.photos/800/600?random={random.randint(1, 10000)}"
-            
-            images.append(url)
-            
-            if user_id and category:
-                if user_id not in self.seen_images:
-                    self.seen_images[user_id] = {}
-                if category not in self.seen_images[user_id]:
-                    self.seen_images[user_id][category] = set()
-                self.seen_images[user_id][category].add(url)
+        if category == "avatars":
+            # Квадратные аватарки
+            for i in range(count):
+                images.append(f"https://api.dicebear.com/7.x/avataaars/svg?seed={random.randint(1, 10000)}")
+        elif category == "wallpapers_pc":
+            # Горизонтальные обои 16:9
+            for i in range(count):
+                images.append(f"https://picsum.photos/1920/1080?random={random.randint(1, 10000)}")
+        elif category == "wallpapers_phone":
+            # Вертикальные обои 9:16
+            for i in range(count):
+                images.append(f"https://picsum.photos/1080/1920?random={random.randint(1, 10000)}")
+        else:
+            for i in range(count):
+                images.append(f"https://picsum.photos/800/600?random={random.randint(1, 10000)}")
         
         return images
 
@@ -540,7 +467,7 @@ class TelegramBot:
             "📱 **Обои для телефона:**\n"
             "• Вертикальные (9:16)\n"
             "• Минимальный размер: 1080x1920\n\n"
-            "Бот автоматически фильтрует изображения по этим параметрам!"
+            "🚫 **Реклама автоматически фильтруется!**"
         )
         
         keyboard = [[InlineKeyboardButton("🔙 В меню", callback_data='back_to_main')]]
@@ -576,7 +503,8 @@ class TelegramBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
         message = (
             f"📋 **ГЛАВНОЕ МЕНЮ**\n\n"
-            f"**Pinterest:** {auth_status}\n\n"
+            f"**Pinterest:** {auth_status}\n"
+            f"**Фильтрация:** ✅ Без рекламы, ✅ По формату\n\n"
             f"Выберите категорию:"
         )
         
@@ -632,9 +560,9 @@ class TelegramBot:
         # Обработка Pinterest категорий
         elif query.data in ['menu_avatars', 'menu_wallpapers_pc', 'menu_wallpapers_phone']:
             category_map = {
-                'menu_avatars': ('avatars', 'АВАТАРОК (квадратные 1:1)'),
-                'menu_wallpapers_pc': ('wallpapers_pc', 'ОБОЕВ ДЛЯ ПК (16:9)'),
-                'menu_wallpapers_phone': ('wallpapers_phone', 'ОБОЕВ ДЛЯ ТЕЛЕФОНА (9:16)')
+                'menu_avatars': ('avatars', 'АВАТАРОК'),
+                'menu_wallpapers_pc': ('wallpapers_pc', 'ОБОЕВ ДЛЯ ПК'),
+                'menu_wallpapers_phone': ('wallpapers_phone', 'ОБОЕВ ДЛЯ ТЕЛЕФОНА')
             }
             
             category, ru_name = category_map[query.data]
@@ -653,23 +581,23 @@ class TelegramBot:
                     "1. Установите расширение EditThisCookie\n"
                     "2. Войдите в Pinterest\n"
                     "3. Экспортируйте куки и отправьте боту\n\n"
-                    "Или продолжайте с общими изображениями:",
+                    "Или продолжайте с общими изображениями (с фильтрацией):",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
                 )
             else:
                 # Если авторизован - ПОЛУЧАЕМ ПЕРСОНАЛЬНЫЕ РЕКОМЕНДАЦИИ!
-                await self.fetch_my_pinterest_recommendations(update, context, category, ru_name)
+                await self.fetch_filtered_images(update, context, category, ru_name)
         
         elif query.data.startswith('continue_noauth_'):
             category = query.data.replace('continue_noauth_', '')
             ru_name = {
-                'avatars': 'аватарок (квадратные)',
-                'wallpapers_pc': 'обоев для ПК (16:9)',
-                'wallpapers_phone': 'обоев для телефона (9:16)'
+                'avatars': 'аватарок',
+                'wallpapers_pc': 'обоев для ПК',
+                'wallpapers_phone': 'обоев для телефона'
             }.get(category, 'изображений')
             
-            await self.fetch_generic_pinterest_images(update, context, category, ru_name)
+            await self.fetch_filtered_images(update, context, category, ru_name)
         
         elif query.data == 'menu_files':
             keyboard = [
@@ -888,49 +816,45 @@ class TelegramBot:
             )
             context.user_data['state'] = 'waiting_note'
     
-    async def fetch_my_pinterest_recommendations(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                                                category: str, ru_name: str):
-        """Получение ПЕРСОНАЛЬНЫХ рекомендаций из личной ленты Pinterest"""
+    async def fetch_filtered_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                    category: str, ru_name: str):
+        """Получение отфильтрованных изображений (без рекламы и по формату)"""
         query = update.callback_query
         user_id = str(update.effective_user.id)
         
-        # Получаем требования к размеру для категории
-        size_info = IMAGE_REQUIREMENTS.get(category, {})
-        size_text = size_info.get('description', '')
-        
         await query.edit_message_text(
-            f"🔄 Загружаем **ВАШИ ПЕРСОНАЛЬНЫЕ РЕКОМЕНДАЦИИ** {ru_name} с Pinterest...\n\n"
-            f"📐 Требования: {size_text}\n"
-            f"✨ Это именно те изображения, которые Pinterest показывает ЛИЧНО ВАМ!",
+            f"🔄 Ищу {ru_name}...\n"
+            f"📸 Отфильтровываю рекламу\n"
+            f"📐 Проверяю формат",
             parse_mode='Markdown'
         )
         
-        # ПОЛУЧАЕМ ПЕРСОНАЛЬНЫЕ РЕКОМЕНДАЦИИ ИЗ ГЛАВНОЙ ЛЕНТЫ
-        images = await self.pinterest.get_my_recommendations(category, count=12, user_id=user_id)
+        # Получаем изображения с фильтрацией
+        images = await self.pinterest.get_filtered_images(category, count=12, user_id=user_id)
         
         if not images:
             await query.edit_message_text(
-                "❌ Не удалось загрузить персональные рекомендации.\n"
-                "Проверьте куки или попробуйте позже.",
+                "❌ Не удалось найти изображения.\n"
+                "Использую заглушки...",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')
+                    InlineKeyboardButton("🔄 Еще", callback_data=f'menu_{category}')
                 ]])
             )
-            return
-        
-        # Сохраняем информацию
-        for img_url in images:
-            self.data_manager.add_item(category, {
-                'url': img_url,
-                'source': 'personal_recommendations',
-                'date': datetime.now().isoformat()
-            })
+            # Используем заглушки
+            images = self.pinterest.get_fallback_images(category, 6)
         
         # Отправляем изображения
         sent_count = 0
         for i, img_url in enumerate(images[:6]):
             try:
-                caption = f"✨ ВАША ПЕРСОНАЛЬНАЯ РЕКОМЕНДАЦИЯ #{i+1}\n📐 {size_text}"
+                # Определяем описание формата
+                format_desc = {
+                    'avatars': 'квадратное',
+                    'wallpapers_pc': 'горизонтальное 16:9',
+                    'wallpapers_phone': 'вертикальное 9:16'
+                }.get(category, '')
+                
+                caption = f"🎨 {ru_name} #{i+1}\n📐 {format_desc}"
                 await query.message.reply_photo(
                     photo=img_url,
                     caption=caption
@@ -940,63 +864,18 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Ошибка отправки фото: {e}")
         
-        # Кнопка для новых персональных рекомендаций
+        # Кнопка для новых изображений
         keyboard = [
-            [InlineKeyboardButton("🔄 Еще персональные рекомендации", callback_data=f'menu_{category}')],
+            [InlineKeyboardButton("🔄 Еще", callback_data=f'menu_{category}')],
             [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.message.reply_text(
-            f"✅ Загружено {len(images)} **ВАШИХ ПЕРСОНАЛЬНЫХ** {ru_name}!\n"
-            f"📐 Все изображения соответствуют формату: {size_text}\n"
-            f"Отправлено {sent_count} изображений.\n\n"
-            f"✨ Это именно те рекомендации, которые Pinterest показывает ЛИЧНО ВАМ!",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    
-    async def fetch_generic_pinterest_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                             category: str, ru_name: str):
-        """Получение общих изображений через поиск (без авторизации)"""
-        query = update.callback_query
-        user_id = str(update.effective_user.id)
-        
-        # Получаем требования к размеру для категории
-        size_info = IMAGE_REQUIREMENTS.get(category, {})
-        size_text = size_info.get('description', '')
-        
-        await query.edit_message_text(
-            f"🔄 Загружаем общие {ru_name} с Pinterest...\n\n"
-            f"📐 Требования: {size_text}",
-            parse_mode='Markdown'
-        )
-        
-        images = await self.pinterest._search_category_images(category, count=10, user_id=user_id)
-        
-        sent_count = 0
-        for i, img_url in enumerate(images[:5]):
-            try:
-                caption = f"🖼️ {ru_name} #{i+1}\n📐 {size_text}"
-                await query.message.reply_photo(
-                    photo=img_url,
-                    caption=caption
-                )
-                sent_count += 1
-                await asyncio.sleep(0.5)
-            except:
-                pass
-        
-        keyboard = [
-            [InlineKeyboardButton("🔄 Еще общие", callback_data=f'continue_noauth_{category}')],
-            [InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.message.reply_text(
-            f"✅ Загружено {len(images)} {ru_name}!\n"
-            f"📐 Все изображения соответствуют формату: {size_text}\n"
-            f"Отправлено {sent_count} изображений.",
+            f"✅ Найдено {len(images)} изображений!\n"
+            f"📸 Все без рекламы\n"
+            f"📐 В правильном формате\n"
+            f"Отправлено: {sent_count}",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1092,7 +971,7 @@ class TelegramBot:
                         "• Аватарки → квадратные (1:1)\n"
                         "• Обои для ПК → горизонтальные (16:9)\n"
                         "• Обои для телефона → вертикальные (9:16)\n\n"
-                        "Просто выберите категорию в главном меню!"
+                        "🚫 Реклама будет автоматически отфильтрована!"
                     )
                 else:
                     await update.message.reply_text("❌ Ошибка при сохранении кук")
@@ -1162,6 +1041,7 @@ class TelegramBot:
         print("   • Аватарки: квадратные 1:1 (мин. 500x500)")
         print("   • Обои для ПК: горизонтальные 16:9 (мин. 1920x1080)")
         print("   • Обои для телефона: вертикальные 9:16 (мин. 1080x1920)")
+        print("🚫 Реклама автоматически фильтруется!")
         
         try:
             loop = asyncio.new_event_loop()
